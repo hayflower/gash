@@ -11,6 +11,7 @@
 #   ./start.sh logs         # follow live log output
 #   ./start.sh latency      # test connection to Polymarket servers
 #   ./start.sh scan         # one-shot scan for current opportunities
+#   ./start.sh dashboard    # start bot + web dashboard on :8080
 
 set -euo pipefail
 
@@ -218,6 +219,15 @@ cmd_scan() {
     "$PYTHON" bot.py scan
 }
 
+cmd_dashboard() {
+    ensure_env
+    ensure_venv
+    install_deps
+    local port="${1:-8080}"
+    log "Starting bot + dashboard on port $port..."
+    "$PYTHON" bot.py dashboard "$port"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -229,16 +239,18 @@ case "${1:-start}" in
     status)   cmd_status ;;
     logs)     cmd_logs ;;
     latency)  cmd_latency ;;
-    scan)     cmd_scan ;;
+    scan)      cmd_scan ;;
+    dashboard) cmd_dashboard "${2:-8080}" ;;
     *)
-        echo "Usage: ./start.sh [start|stop|update|status|logs|latency|scan]"
+        echo "Usage: ./start.sh [start|stop|update|status|logs|latency|scan|dashboard]"
         echo ""
-        echo "  start    Start the bot in background (default)"
-        echo "  stop     Stop the bot"
+        echo "  start      Start the bot in background (default)"
+        echo "  stop       Stop the bot"
         echo "  update   Git pull + reinstall deps + restart if running"
         echo "  status   Check if running + show recent logs"
         echo "  logs     Follow live log output (Ctrl+C to stop)"
         echo "  latency  Test connection speed to Polymarket"
-        echo "  scan     One-shot scan for current arb opportunities"
+        echo "  scan       One-shot scan for current arb opportunities"
+        echo "  dashboard  Start bot + web dashboard (default port 8080)"
         ;;
 esac

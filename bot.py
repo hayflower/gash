@@ -1389,11 +1389,27 @@ class CapitalTracker:
 # Main bot loop
 # ---------------------------------------------------------------------------
 
-def run_bot():
+def run_bot(dash=None):
+    """Main bot loop. If dash is a DashboardState, it will be updated live."""
     capital = CapitalTracker(BANKROLL)
 
     assets_str = ",".join(ENABLED_ASSETS)
     durations_str = ",".join(f"{d}m" for d in MARKET_DURATIONS)
+
+    if dash:
+        dash.config = {
+            "order_mode": ORDER_MODE,
+            "max_combined_cost": MAX_COMBINED_COST,
+            "min_profit_margin": MIN_PROFIT_MARGIN,
+            "order_size_usdc": ORDER_SIZE_USDC,
+            "num_slices": NUM_SLICES,
+            "entry_delay_sec": ENTRY_DELAY_SEC,
+            "assets": assets_str,
+            "durations": durations_str,
+            "bankroll": BANKROLL,
+        }
+        dash.bankroll = BANKROLL
+        dash.status = "scanning"
 
     log.info("=" * 60)
     log.info("Polymarket Crypto Up/Down Arbitrage Bot")
@@ -1439,6 +1455,12 @@ def run_bot():
                 continue
 
             log.info(f"Scanning... {capital}")
+            if dash:
+                dash.status = "scanning"
+                dash.deployed = capital.deployed
+                dash.available = capital.available
+                dash.realized_pnl = capital.realized_pnl
+                dash.daily_spent = capital._daily_spent
             # Force verbose discovery on first scan to aid debugging
             if first_scan:
                 _prev_level = log.getEffectiveLevel()
@@ -1449,21 +1471,35 @@ def run_bot():
                 first_scan = False
             log.info(f"  Found {len(all_markets)} active markets "
                      f"({','.join(ENABLED_ASSETS)} / {durations_str})")
+            if dash:
+                dash.markets_found = len(all_markets)
 
             market = pick_next_market(all_markets, traded_markets)
             if not market:
                 log.info("  No untraded market available. Waiting 30s...")
+                if dash:
+                    dash.status = "waiting"
+                    dash.current_market = ""
                 time.sleep(30)
                 continue
 
             log.info(f"  Target: {market.title} [{market.asset.upper()} {market.duration_label}]")
+            if dash:
+                dash.current_market = market.title
+                dash.market_asset = market.asset
+                dash.market_duration = market.duration_label
+                dash.market_ends = market.end_date
 
             # Fetch live fee rate from CLOB (not from stale Gamma API data)
             live_fee_bps = fetch_market_fees(api, market)
             log.info(f"  Ends: {market.end_date} | Live fee_bps: {live_fee_bps}")
+            if dash:
+                dash.fee_bps = live_fee_bps
 
             # Verify actual USDC balance on exchange
             actual_balance = executor.get_balance()
+            if dash:
+                dash.exchange_balance = actual_balance
             if actual_balance is not None:
                 if actual_balance < 10:
                     log.warning(f"  Insufficient exchange balance: "
@@ -1499,12 +1535,24 @@ def run_bot():
 
             # Poll for arb opportunity
             windows_scanned += 1
+            if dash:
+                dash.windows_scanned = windows_scanned
+                dash.status = "scanning"
             log.info(f"  Polling order book (window #{windows_scanned})...")
             deadline = market.end_timestamp - 30 if market.end_timestamp else time.time() + 120
             plan = None
 
             while time.time() < deadline:
                 snapshot = get_snapshot(api, market)
+                if dash:
+                    dash.up_best_ask = snapshot.up_best_ask
+                    dash.up_best_bid = snapshot.up_best_bid
+                    dash.down_best_ask = snapshot.down_best_ask
+                    dash.down_best_bid = snapshot.down_best_bid
+                    dash.combined_ask = snapshot.combined_ask
+                    dash.up_depth = snapshot.up_ask_depth
+                    dash.down_depth = snapshot.down_ask_depth
+                    dash._notify()
                 plan = strategy.evaluate(snapshot,
                                          available_capital=available,
                                          fee_rate_bps=live_fee_bps,
@@ -1515,12 +1563,23 @@ def run_bot():
 
             traded_markets.add(market.condition_id)
 
+            if dash:
+                dash.opportunities_seen = strategy.opportunities_seen
+
             if not plan:
                 log.info("  No arb opportunity this window.")
                 continue
 
             # Execute
             strategy.opportunities_traded += 1
+            if dash:
+                dash.status = "trading"
+                dash.last_plan = {
+                    k: plan[k] for k in ("mode", "combined_net", "margin_net",
+                                         "vwap_margin", "total_cost", "expected_profit")
+                    if k in plan
+                }
+                dash.opportunities_traded = strategy.opportunities_traded
             log.info(f"  *** ARB FOUND ({plan['mode'].upper()}) ***")
             log.info(f"  Combined: {plan['combined_net']:.4f} | "
                      f"Margin: {plan['margin_net']:.4f} ({plan['margin_net'] * 100:.2f}%) | "
@@ -1544,6 +1603,18 @@ def run_bot():
                      f"Taker fills: {position.taker_fills}")
             log.info(f"  {capital}")
             log.info(f"  Fill rate: {executor.fill_rate} | API: {api.stats}")
+            if dash:
+                dash.fill_rate = executor.fill_rate
+                dash.api_stats = api.stats
+                dash.deployed = capital.deployed
+                dash.available = capital.available
+                dash.positions = [
+                    {"market_title": p.market_title, "pairs": p.pairs,
+                     "total_invested": p.total_invested, "expected_profit": p.expected_profit,
+                     "maker_fills": p.maker_fills, "taker_fills": p.taker_fills}
+                    for p in positions
+                ]
+                dash._notify()
 
             # Wait for resolution, then free capital
             if market.end_timestamp:
@@ -1576,6 +1647,12 @@ def run_bot():
                 log.warning(f"  Resolution data unavailable, estimating payout from pairs")
             capital.resolve(position.total_invested, payout)
             log.info(f"  Resolved. Payout: ${payout:.2f} | {capital}")
+            if dash:
+                dash.status = "resolved"
+                dash.deployed = capital.deployed
+                dash.available = capital.available
+                dash.realized_pnl = capital.realized_pnl
+                dash._notify()
 
         except KeyboardInterrupt:
             log.info("")
@@ -1592,6 +1669,9 @@ def run_bot():
                          f"@ {p.combined_avg_cost:.4f} -> ${p.expected_profit:.2f} "
                          f"(maker={p.maker_fills} taker={p.taker_fills})")
             log.info("=" * 60)
+            if dash:
+                dash.status = "stopped"
+                dash._notify()
             break
         except Exception as e:
             log.error(f"Unexpected error: {e}", exc_info=True)
@@ -1723,7 +1803,19 @@ def test_latency():
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
 
-    if cmd == "analyze":
+    if cmd == "dashboard":
+        port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+        from dashboard import state as dash_state, DashboardLogHandler, start_dashboard_server
+        # Attach log handler so all log output feeds the dashboard
+        handler = DashboardLogHandler(dash_state)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"))
+        logging.getLogger().addHandler(handler)
+        server = start_dashboard_server(port)
+        log.info(f"Dashboard running at http://localhost:{port}")
+        run_bot(dash=dash_state)
+    elif cmd == "analyze":
         analyze_trader("0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d", "gabagool22")
         print()
         analyze_trader("0xf247584e41117bbbe4cc06e4d2c95741792a5216", "Wee-Playroom")
@@ -1753,8 +1845,10 @@ if __name__ == "__main__":
     elif cmd == "run":
         run_bot()
     else:
-        print("Usage: python bot.py [run|scan|analyze|latency]")
-        print("  run     - Start the trading bot (default)")
-        print("  scan    - One-shot scan for current opportunities")
-        print("  analyze - Analyze gabagool22 and Wee-Playroom trades")
-        print("  latency - Test network latency to Polymarket servers")
+        print("Usage: python bot.py [run|dashboard|scan|analyze|latency]")
+        print("  run          - Start the trading bot (default)")
+        print("  dashboard    - Start bot + web dashboard on :8080")
+        print("  dashboard N  - Start bot + web dashboard on port N")
+        print("  scan         - One-shot scan for current opportunities")
+        print("  analyze      - Analyze gabagool22 and Wee-Playroom trades")
+        print("  latency      - Test network latency to Polymarket servers")
